@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile config.py main.py voice/listen.py voice/speak.py brain/interpreter.py actions/app_control.py actions/browser.py actions/system.py ui/interface.py)",
+      "Bash(python -c ' *)"
+    ]
+  }
+}
