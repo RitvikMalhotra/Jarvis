@@ -12,6 +12,7 @@ from config import (
     PAUSE_THRESHOLD,
     PHRASE_TIME_LIMIT,
 )
+from logger import log
 
 
 class _OnsetRecognizer(sr.Recognizer):
@@ -119,6 +120,7 @@ class Listener:
             return True
         if self._init_microphone():
             return True
+        log("Microphone retry...")
         time.sleep(MIC_RECOVERY_DELAY)
         return False
 

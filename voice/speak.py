@@ -7,13 +7,18 @@ from config import VOICE_RATE, VOICE_VOLUME
 
 class Speaker:
     def __init__(self, rate=VOICE_RATE, volume=VOICE_VOLUME):
-        self.engine = pyttsx3.init()
-        self.engine.setProperty("rate", rate)
-        self.engine.setProperty("volume", volume)
+        self.engine = None
         self._lock = threading.Lock()
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty("rate", rate)
+            engine.setProperty("volume", volume)
+            self.engine = engine
+        except Exception:
+            self.engine = None
 
     def speak(self, text):
-        if not text:
+        if not text or self.engine is None:
             return
         with self._lock:
             try:
@@ -28,6 +33,8 @@ class Speaker:
                 pass
 
     def close(self):
+        if self.engine is None:
+            return
         with self._lock:
             try:
                 self.engine.stop()

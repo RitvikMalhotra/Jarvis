@@ -1,6 +1,6 @@
 import re
 
-from config import WAKE_WORD
+from brain import wake_word
 
 NUMBER_WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
@@ -23,8 +23,7 @@ def parse(command):
     if not command:
         return []
 
-    text = command.lower().strip()
-    text = re.sub(rf"\b{re.escape(WAKE_WORD)}\b", " ", text)
+    text = wake_word.strip_wake_word(command)
     text = text.strip(" ,.!?")
 
     if not text:

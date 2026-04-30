@@ -1,16 +1,26 @@
 import re
+import subprocess
+import sys
 import threading
 import time
+from pathlib import Path
 
+import single_instance
 import state
 from actions import app_control, app_index, browser, installer
 from actions import system as sys_actions
+from brain import wake_word
 from brain.interpreter import parse
-from config import ENABLE_TRAY, MIC_RECOVERY_DELAY, NON_WAKE_HIDE_DELAY_MS, WAKE_WORD
+from config import ENABLE_TRAY, MIC_RECOVERY_DELAY, NON_WAKE_HIDE_DELAY_MS
+from logger import log
 from ui.interface import JarvisUI
 from ui.tray import create_tray, is_available as tray_available
 from voice.listen import Listener
 from voice.speak import Speaker
+
+SESSION_TIMEOUT_S = 60
+PROJECT_DIR = Path(__file__).resolve().parent
+SUPERVISOR_PATH = PROJECT_DIR / "dev_supervisor.py"
 
 _YES_PATTERN = re.compile(
     r"\b(yes|yeah|yep|yup|sure|ok|okay|please|alright|fine|do it|go ahead|install)\b"
@@ -18,6 +28,7 @@ _YES_PATTERN = re.compile(
 _NO_PATTERN = re.compile(
     r"\b(no|nope|nah|cancel|don'?t|never mind|nevermind|stop|abort)\b"
 )
+_GO_IDLE_PATTERN = re.compile(r"\b(go\s+idle|goodbye|stop\s+listening|that'?s\s+all)\b")
 
 
 def _is_affirmative(text):
@@ -27,6 +38,36 @@ def _is_affirmative(text):
     if _NO_PATTERN.search(text):
         return False
     return bool(_YES_PATTERN.search(text))
+
+
+def _save_for_dev_mode():
+    try:
+        app_index.refresh()
+        log("State saved for development mode")
+    except Exception as e:
+        log(f"Save before dev mode failed: {e}")
+
+
+def _spawn_supervisor():
+    try:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        if not pythonw.exists():
+            pythonw = Path(sys.executable)
+
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+
+        subprocess.Popen(
+            [str(pythonw), str(SUPERVISOR_PATH)],
+            cwd=str(PROJECT_DIR),
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        log("Spawned dev supervisor")
+        return True
+    except Exception as e:
+        log(f"Failed to spawn supervisor: {e}")
+        return False
 
 
 def _handle_open_app(app, speaker, ui, listener):
@@ -74,8 +115,12 @@ def execute_action(action, speaker, ui, stop_event, listener):
     if kind == "dev_mode":
         ui.set_status("Idle")
         ui.set_command("Entering development mode")
-        speaker.speak("Entering development mode. Shutting down Jarvis.")
+        speaker.speak("Entering development mode")
+        log("Entering development mode")
         state.enter_development_mode()
+        _save_for_dev_mode()
+        _spawn_supervisor()
+        single_instance.release()
         stop_event.set()
         ui.quit()
         return
@@ -141,10 +186,14 @@ def handle_command(text, speaker, ui, stop_event, listener):
             return
 
 
-def _run_session(ui, stop_event):
-    listener = Listener()
-    speaker = Speaker()
-    speaker.speak("Jarvis online")
+def _run_session(ui, stop_event, listener, speaker, was_resumed=False):
+    is_active = bool(was_resumed)
+    last_command_time = time.time() if is_active else 0.0
+
+    if is_active:
+        ui.show()
+        ui.set_status("Listening")
+        log("Active mode")
 
     def on_voice_onset():
         if stop_event.is_set():
@@ -152,42 +201,106 @@ def _run_session(ui, stop_event):
         ui.show()
         ui.set_status("Listening")
 
-    try:
-        while not stop_event.is_set():
-            try:
-                text = listener.listen(on_speech_start=on_voice_onset)
+    while not stop_event.is_set():
+        try:
+            if is_active and last_command_time > 0:
+                if time.time() - last_command_time > SESSION_TIMEOUT_S:
+                    speaker.speak("Going idle")
+                    log("Session timeout")
+                    is_active = False
+                    last_command_time = 0.0
+                    ui.set_status("Idle")
+                    ui.schedule_hide()
 
-                if stop_event.is_set():
-                    return
+            text = listener.listen(
+                on_speech_start=on_voice_onset if not is_active else None
+            )
 
-                if not text or WAKE_WORD not in text:
+            if stop_event.is_set():
+                return
+
+            if not text:
+                if not is_active:
+                    ui.set_status("Idle")
+                    ui.schedule_hide(delay_ms=NON_WAKE_HIDE_DELAY_MS)
+                continue
+
+            print(f"Heard: {text}", flush=True)
+
+            if not is_active:
+                if not wake_word.is_wake_word_present(text):
+                    print("No wake word detected", flush=True)
                     ui.set_status("Idle")
                     ui.schedule_hide(delay_ms=NON_WAKE_HIDE_DELAY_MS)
                     continue
 
-                stripped = text.replace(WAKE_WORD, "").strip(" ,.!?")
+                print("Wake word detected", flush=True)
+                log("Session started")
+                is_active = True
+                last_command_time = time.time()
 
-                if not stripped:
+                command = wake_word.strip_wake_word(text)
+                ui.show()
+
+                if not command:
                     speaker.speak("Yes?")
                     ui.set_command(text)
                     ui.set_status("Listening")
-                    follow_up = listener.listen()
-                    if not follow_up:
-                        ui.set_status("Idle")
-                        ui.schedule_hide()
-                        continue
-                    handle_command(follow_up, speaker, ui, stop_event, listener)
-                else:
-                    handle_command(text, speaker, ui, stop_event, listener)
+                    continue
 
-                if stop_event.is_set():
-                    return
+                handle_command(text, speaker, ui, stop_event, listener)
+            else:
+                ui.show()
+                last_command_time = time.time()
 
+                if _GO_IDLE_PATTERN.search(text.lower()):
+                    speaker.speak("Going idle")
+                    log("Session ended by command")
+                    is_active = False
+                    last_command_time = 0.0
+                    ui.set_status("Idle")
+                    ui.schedule_hide()
+                    continue
+
+                handle_command(text, speaker, ui, stop_event, listener)
+
+            if stop_event.is_set():
+                return
+
+            if is_active:
+                ui.set_status("Listening")
+            else:
                 ui.set_status("Idle")
                 ui.schedule_hide()
 
-            except Exception:
-                time.sleep(0.3)
+        except Exception as e:
+            log(f"Loop iteration error, continuing: {e}")
+            time.sleep(0.3)
+
+
+def backend_loop(ui, stop_event, resumed=False):
+    listener = Listener()
+    speaker = Speaker()
+
+    if resumed:
+        speaker.speak("Development mode exited. I'm back.")
+        log("Resumed from development mode")
+    else:
+        speaker.speak("Jarvis online")
+
+    first_run = True
+    try:
+        while not stop_event.is_set():
+            try:
+                _run_session(
+                    ui, stop_event, listener, speaker,
+                    was_resumed=resumed and first_run,
+                )
+                first_run = False
+            except Exception as e:
+                log(f"Error occurred, retrying... ({e})")
+                ui.set_status("Error")
+                time.sleep(MIC_RECOVERY_DELAY)
     finally:
         try:
             speaker.close()
@@ -199,44 +312,50 @@ def _run_session(ui, stop_event):
             pass
 
 
-def backend_loop(ui, stop_event):
-    while not stop_event.is_set():
-        try:
-            _run_session(ui, stop_event)
-        except Exception:
-            ui.set_status("Error")
-            time.sleep(MIC_RECOVERY_DELAY)
-            continue
-
-
 def main():
-    ui = JarvisUI()
-    stop_event = threading.Event()
+    resumed = "--resumed" in sys.argv
 
-    def on_quit():
-        stop_event.set()
-        ui.quit()
+    log("Starting Jarvis" + (" (resumed)" if resumed else ""))
 
-    worker = threading.Thread(
-        target=backend_loop, args=(ui, stop_event), daemon=True
-    )
-    worker.start()
+    timeout = 10.0 if resumed else 0.5
+    if not single_instance.acquire_with_retry(timeout=timeout):
+        log("Instance already running")
+        return
 
-    icon = None
-    if ENABLE_TRAY and tray_available():
-        icon = create_tray(on_show=ui.show, on_quit=on_quit)
-        if icon is not None:
-            threading.Thread(target=icon.run, daemon=True).start()
+    log("Jarvis started")
 
     try:
-        ui.run()
-    finally:
-        stop_event.set()
-        if icon is not None:
-            try:
-                icon.stop()
-            except Exception:
-                pass
+        ui = JarvisUI()
+        stop_event = threading.Event()
+
+        def on_quit():
+            stop_event.set()
+            ui.quit()
+
+        worker = threading.Thread(
+            target=backend_loop, args=(ui, stop_event, resumed), daemon=True
+        )
+        worker.start()
+
+        icon = None
+        if ENABLE_TRAY and tray_available():
+            icon = create_tray(on_show=ui.show, on_quit=on_quit)
+            if icon is not None:
+                threading.Thread(target=icon.run, daemon=True).start()
+
+        try:
+            ui.run()
+        finally:
+            stop_event.set()
+            if icon is not None:
+                try:
+                    icon.stop()
+                except Exception:
+                    pass
+
+        log("Jarvis stopped")
+    except Exception as e:
+        log(f"Fatal error in main: {e}")
 
 
 if __name__ == "__main__":

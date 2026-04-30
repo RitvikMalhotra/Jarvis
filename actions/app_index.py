@@ -21,16 +21,67 @@ def _start_menu_dirs():
     return dirs
 
 
-def _scan():
+def _scan_start_menu():
     apps = {}
     for root in _start_menu_dirs():
         if not root.exists():
             continue
         for path in root.rglob("*.lnk"):
             name = path.stem.lower().strip()
-            if not name:
-                continue
-            apps.setdefault(name, str(path))
+            if name:
+                apps.setdefault(name, str(path))
+    return apps
+
+
+def _scan_app_paths():
+    apps = {}
+    try:
+        import winreg
+    except ImportError:
+        return apps
+
+    sub_path = r"Software\Microsoft\Windows\CurrentVersion\App Paths"
+    for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            key = winreg.OpenKey(root, sub_path)
+        except OSError:
+            continue
+        try:
+            i = 0
+            while True:
+                try:
+                    sub_name = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+
+                bare = sub_name[:-4] if sub_name.lower().endswith(".exe") else sub_name
+                bare = bare.lower().strip()
+                if not bare:
+                    continue
+
+                try:
+                    sub_key = winreg.OpenKey(key, sub_name)
+                    try:
+                        path, _ = winreg.QueryValueEx(sub_key, "")
+                    finally:
+                        winreg.CloseKey(sub_key)
+                except OSError:
+                    continue
+
+                if path:
+                    apps.setdefault(bare, path)
+        finally:
+            winreg.CloseKey(key)
+    return apps
+
+
+def _scan():
+    apps = {}
+    for name, path in _scan_start_menu().items():
+        apps.setdefault(name, path)
+    for name, path in _scan_app_paths().items():
+        apps.setdefault(name, path)
     return apps
 
 
@@ -48,8 +99,10 @@ def _load_cache():
 def _save_cache(apps):
     try:
         CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_PATH, "w", encoding="utf-8") as f:
+        tmp_path = CACHE_PATH.with_suffix(CACHE_PATH.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(apps, f, indent=2)
+        tmp_path.replace(CACHE_PATH)
     except Exception:
         pass
 
@@ -75,23 +128,30 @@ def refresh():
     return _cached_index
 
 
+def _tokens(s):
+    return set(re.findall(r"\w+", s.lower()))
+
+
 def _score(query, name):
-    seq = SequenceMatcher(None, query, name).ratio()
+    q = query.lower().strip()
+    n = name.lower().strip()
 
-    sub = 0.0
-    if query in name:
-        sub = 1.0
-    elif name in query:
-        sub = 0.7
+    if q == n:
+        return 2.0
 
-    q_tokens = set(re.findall(r"\w+", query))
-    n_tokens = set(re.findall(r"\w+", name))
-    if q_tokens and n_tokens:
-        tok = len(q_tokens & n_tokens) / len(q_tokens) * 0.9
-    else:
-        tok = 0.0
+    q_set = _tokens(q)
+    n_set = _tokens(n)
 
-    return max(seq, sub, tok)
+    if q_set and n_set and q_set.issubset(n_set):
+        if q_set == n_set:
+            return 1.5
+        extra = len(n_set - q_set)
+        return max(0.6, 1.0 - 0.05 * extra)
+
+    if len(q) >= 3 and q in n:
+        return 0.7 + 0.3 * (len(q) / max(len(n), 1))
+
+    return SequenceMatcher(None, q, n).ratio() * 0.7
 
 
 def _find_in(query, index, threshold):
@@ -114,7 +174,7 @@ def _find_in(query, index, threshold):
     return None
 
 
-def find(query, threshold=0.55):
+def find(query, threshold=0.7):
     global _refreshed_this_session
     index = get_index()
     result = _find_in(query, index, threshold)
