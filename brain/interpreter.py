@@ -81,6 +81,29 @@ def _interpret(text):
     if m:
         return {"type": "youtube_play", "query": m.group(1).strip()}
 
+    # --- media playback control (must come before generic 'play' fallback) ---
+    if re.search(r"\b(pause|stop)\s*(the\s+)?(video|music|song|playback)?\b", text):
+        return {"type": "media_control", "action": "pause"}
+
+    if re.search(r"\bplay\s*(the\s+)?(video|music|song|playback)\b", text):
+        return {"type": "media_control", "action": "play"}
+
+    if re.search(r"\b(resume)\s*(the\s+)?(video|music|song|playback)?\b", text):
+        return {"type": "media_control", "action": "play"}
+
+    if re.search(r"\b(next|skip)\s*(the\s+)?(video|track|song)?\b", text):
+        return {"type": "media_control", "action": "next"}
+
+    if re.search(r"\b(previous|prev|go back|last)\s*(the\s+)?(video|track|song)?\b", text):
+        return {"type": "media_control", "action": "previous"}
+
+    if re.search(r"\b(rewind|go back\s+\d+)\b", text):
+        return {"type": "media_control", "action": "rewind"}
+
+    if re.search(r"\b(fast forward|skip forward|forward)\b", text):
+        return {"type": "media_control", "action": "forward"}
+    # -------------------------------------------------------------------------
+
     m = re.search(r"(?:search|find|look up)\s+(.+?)\s+on\s+youtube", text)
     if m:
         return {"type": "youtube_search", "query": m.group(1).strip()}

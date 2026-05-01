@@ -7,9 +7,9 @@ from pathlib import Path
 
 import single_instance
 import state
-from actions import app_control, app_index, browser, installer
+from actions import app_control, app_index, browser, installer, media_control
 from actions import system as sys_actions
-from brain import wake_word
+from brain import ai_engine, wake_word
 from brain.interpreter import parse
 from config import ENABLE_TRAY, MIC_RECOVERY_DELAY, NON_WAKE_HIDE_DELAY_MS
 from logger import log
@@ -168,22 +168,53 @@ def execute_action(action, speaker, ui, stop_event, listener):
             speaker.speak(f"I couldn't find the {folder} folder")
         return
 
-
-def handle_command(text, speaker, ui, stop_event, listener):
-    ui.set_command(text)
-    ui.set_status("Processing")
-
-    actions = parse(text)
-
-    if not actions:
-        speaker.speak("I didn't understand that")
+    if kind == "media_control":
+        media_action = action.get("action", "pause")
+        speaker.speak(f"Media {media_action}")
+        ok = media_control.send_media_key(media_action)
+        if not ok:
+            speaker.speak("No active media found")
         return
 
+
+def _execute_actions(actions, speaker, ui, stop_event, listener):
     ui.set_status("Executing")
     for action in actions:
         execute_action(action, speaker, ui, stop_event, listener)
         if stop_event.is_set():
             return
+
+
+def handle_command(text, speaker, ui, stop_event, listener):
+    ui.set_command(text)
+    ui.set_status("Processing")
+
+    decision = ai_engine.decide(text)
+
+    if decision is not None:
+        mode = decision.get("mode")
+
+        if mode == "chat":
+            response = (decision.get("response") or "").strip()
+            if response:
+                speaker.speak(response)
+            else:
+                speaker.speak("I'm not sure what to say to that.")
+            return
+
+        if mode == "action":
+            actions = decision.get("actions") or []
+            if not actions:
+                speaker.speak("I'm not sure what you'd like me to do.")
+                return
+            _execute_actions(actions, speaker, ui, stop_event, listener)
+            return
+
+    actions = parse(text)
+    if not actions:
+        speaker.speak("I didn't understand that")
+        return
+    _execute_actions(actions, speaker, ui, stop_event, listener)
 
 
 def _run_session(ui, stop_event, listener, speaker, was_resumed=False):

@@ -18,3 +18,7 @@ UI_HEIGHT = 200
 UI_HIDE_DELAY_MS = 4000
 MIC_RECOVERY_DELAY = 2.0
 ENABLE_TRAY = True
+
+AI_MODEL = "claude-sonnet-4-6"
+AI_MAX_TOKENS = 512
+AI_API_KEY_ENV = "ANTHROPIC_API_KEY"  # set this environment variable, do not hardcode the key
